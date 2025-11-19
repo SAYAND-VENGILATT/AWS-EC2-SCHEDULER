@@ -14,7 +14,7 @@ A cloud cost optimization solution that automatically starts and stops EC2 insta
 
 ### Step 1: Clone and Setup
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/SAYAND-VENGILATT/AWS-EC2-SCHEDULER.git
 cd aws-ec2-scheduler
 ```
 ### Step 2: Package Lambda Functions
