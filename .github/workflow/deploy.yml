@@ -1,0 +1,129 @@
+name: Deploy EC2 Scheduler
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  # Job to validate Terraform code
+  validate-terraform:
+    name: Validate Terraform
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: 1.5.0
+    
+    - name: Terraform Format Check
+      run: |
+        cd terraform
+        terraform fmt -check -recursive
+    
+    - name: Terraform Init
+      run: |
+        cd terraform
+        terraform init
+    
+    - name: Terraform Validate
+      run: |
+        cd terraform
+        terraform validate
+
+  # Job to deploy to AWS (only on main branch)
+  deploy-aws:
+    name: Deploy to AWS
+    runs-on: ubuntu-latest
+    needs: validate-terraform
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+    
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.8'
+    
+    - name: Install dependencies
+      run: |
+        pip install boto3
+    
+    - name: Package Lambda functions
+      run: |
+        cd lambda_functions
+        zip start_instances.zip start_instances.py
+        zip stop_instances.zip stop_instances.py
+        mv *.zip ../
+    
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: 1.5.0
+    
+    - name: Terraform Init
+      run: |
+        cd terraform
+        terraform init
+    
+    - name: Terraform Plan
+      run: |
+        cd terraform
+        terraform plan -input=false
+    
+    - name: Terraform Apply
+      run: |
+        cd terraform
+        terraform apply -auto-approve -input=false
+      env:
+        TF_API_TOKEN: ${{ secrets.TF_API_TOKEN }}
+
+  # Job to test deployment (simplified - no unit tests, just validation)
+  verify-deployment:
+    name: Verify Deployment
+    runs-on: ubuntu-latest
+    needs: deploy-aws
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+    
+    - name: Verify Lambda Functions
+      run: |
+        echo "Verifying Lambda functions were created..."
+        aws lambda list-functions --query 'Functions[?starts_with(FunctionName, `ec2-`)].FunctionName' --output table
+        
+        START_FUNCTION=$(aws lambda get-function --function-name ec2-start-instances --query 'Configuration.FunctionName' --output text 2>/dev/null || echo "NOT_FOUND")
+        STOP_FUNCTION=$(aws lambda get-function --function-name ec2-stop-instances --query 'Configuration.FunctionName' --output text 2>/dev/null || echo "NOT_FOUND")
+        
+        if [ "$START_FUNCTION" = "ec2-start-instances" ] && [ "$STOP_FUNCTION" = "ec2-stop-instances" ]; then
+          echo "✅ Both Lambda functions created successfully!"
+        else
+          echo "❌ Lambda functions verification failed"
+          exit 1
+        fi
